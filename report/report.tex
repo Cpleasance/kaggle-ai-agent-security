@@ -45,8 +45,10 @@ Modern tool-using AI agents can search the web, read files, send emails, and
 issue HTTP requests on a user's behalf. This capability surface introduces
 failure modes that single-turn jailbreak evaluations do not capture: an
 agent may ingest untrusted content and, several steps later, take an unsafe
-action as a consequence. The \emph{AI Agent Security: Multi-Step Tool
-Attacks} competition \cite{kaggleagentsec2026} introduced a deterministic
+action as a consequence. This is the multi-step setting of indirect prompt
+injection \cite{greshake2022}, in which untrusted content retrieved by a
+tool is later acted on with the user's privileges. The \emph{AI Agent
+Security: Multi-Step Tool Attacks} competition \cite{kaggleagentsec2026} introduced a deterministic
 offline benchmark for this class of failure, scoring submitted attack
 algorithms against four security predicates (\texttt{EXFILTRATION},
 \texttt{UNTRUSTED\_TO\_ACTION}, \texttt{DESTRUCTIVE\_WRITE},
@@ -69,11 +71,43 @@ check
 
 \section{Methodology}
 
+\subsection{Setup}
+\label{sec:setup}
+
+A submission implements an attack-search algorithm that outputs up to $N$
+candidate traces, each a complete agent trajectory generated in the
+competition's sandboxed environment. Traces are replayed by the evaluator
+against six tool calls tied to the four predicates
+(\texttt{web.search}, \texttt{email.read}, \texttt{email.send},
+\texttt{http.post}, \texttt{fs.delete}, \texttt{fs.write}); only
+\emph{successful} tool calls count. Scoring is submission-wide, not
+per-trace, with all quantities summed across every predicate finding in
+every replayed trace of the submission:
+\begin{align*}
+\text{raw} &= \textstyle\sum(\text{severity weights}) \\
+&\quad + 2 \cdot |\{\text{unique } \texttt{cell\_signature}\}| \\
+\text{score} &= \min\!\big(1000,\ (\text{raw}/200{,}000) \times 1000\big)
+\end{align*}
+where severity weights are re-mapped from 1--5 to 1--16, and the second
+term counts unique tool-call signatures across the whole submission.
+$N$ is therefore a direct allocation of the attack's fixed,
+per-model 18{,}000-second replay budget -- which is what makes an
+``N-sweep'' (Section~\ref{sec:scaling}, Fig.~\ref{fig:exfil-sweep}) a
+meaningful thing to run. Where this report refers to a ``quota'' for a
+given predicate, that denotes how the \emph{attacker's own}
+candidate-generation strategy chose to allocate its $N$ candidates across
+predicate types, not a rule enforced by the evaluator. Code for the
+winning submission, the full experimental log, and the underlying tracker
+are available at
+\url{https://github.com/Cpleasance/kaggle-ai-agent-security}.
+
 \subsection{The Scope-Mismatch Exploit}
 
 The \texttt{CONFUSED\_DEPUTY} predicate fires when \texttt{email.send}
-succeeds without explicit user intent for that action. The public
-guardrail's defense against this class of failure is source-based taint
+succeeds without explicit user intent for that action. The term traces to
+Hardy's classic confused-deputy problem \cite{hardy1988}, in which a
+legitimately privileged component is manipulated into misusing its
+authority. The public guardrail's defense against this class of failure is source-based taint
 tracking: it inspects a recent window of prior tool calls for untrusted
 input (e.g. \texttt{web.search}, \texttt{email.read}) that could have
 influenced the privileged call.
@@ -91,6 +125,7 @@ keyword triggers while still satisfying the predicate's actual firing
 condition.
 
 \subsection{Scaling}
+\label{sec:scaling}
 
 The technique alone was not sufficient for a competitive score; a K=1
 (single-hit-per-trace) baseline at N=200 candidate traces scored only 4.105
@@ -107,7 +142,8 @@ candidate traces (real, confirmed Kaggle leaderboard scores).}
 \label{fig:cd-scaling}
 \end{figure}
 
-As a point of comparison, Fig.~\ref{fig:exfil-sweep} shows an N-sweep run
+As a point of comparison -- one that later became consequential for the
+final-submission decision -- Fig.~\ref{fig:exfil-sweep} shows an N-sweep run
 against the same benchmark using an \texttt{EXFILTRATION}-based technique,
 which plateaus around a score of 40--41 from N$\approx$650 onward.
 \texttt{EXFILTRATION} submissions of this kind scored 0.000 on the public
@@ -121,8 +157,9 @@ on that basis rather than on raw score alone.
 \centering
 \includegraphics[width=0.85\linewidth]{figures/exfil_n_sweep.png}
 \caption{EXFILTRATION (K=1, pure) score as a function of N, showing
-diminishing returns beyond N$\approx$650. Included for methodological
-comparison; this technique was not part of the final submission.}
+diminishing returns beyond N$\approx$650, where the score plateaus at
+$\approx$40--41. Included for methodological comparison; this technique
+was not part of the final submission.}
 \label{fig:exfil-sweep}
 \end{figure}
 
@@ -131,7 +168,11 @@ comparison; this technique was not part of the final submission.}
 During development, a technique was identified that would have scored
 substantially higher: mutating a trailing tag on an otherwise
 near-identical breaching message to farm the evaluator's additive
-per-candidate novelty bonus at scale. This was not included in the final
+per-candidate novelty bonus at scale. In the terms defined in
+Section~\ref{sec:setup}, this manipulates the unique tool-call signature
+(\texttt{cell\_signature}) term directly -- each distinct tag produces a
+new unique signature, farming the $+2$-per-cell component thousands of
+times independent of any real predicate finding. This was not included in the final
 submission. It is a scoring-formula artifact rather than a security
 finding, it works against the competition's own ``usefulness to the
 benchmark community'' judging criterion, and a submission consisting of
@@ -155,23 +196,31 @@ quotas are known, including runs well outside the fitted range.
 \includegraphics[width=0.85\linewidth]{figures/model_predicted_vs_actual.png}
 \caption{Model 1 (quota-linear) predicted vs. actual score. In-range points
 (N$\leq$450, blue circles) cluster near the diagonal; out-of-range points
-(N$>$450, red triangles) are systematically under-predicted, most sharply
-for the pure-EXFILTRATION N-sweep, which follows a saturating curve
-(Fig.~\ref{fig:exfil-sweep}) rather than the linear-in-quota relationship
-the model assumes.}
+(N$>$450, red triangles) split in both directions: under-predicted in the
+EXFILTRATION mid-range (e.g. 20.7 predicted vs.\ 40.6 actual at N=800), and
+over-predicted at the largest N tested (51.8 vs.\ 40.3 at N=2000) and for
+the winning pure-CONFUSED\_DEPUTY run (14.0 vs.\ 9.9--10.4 at N=800) --
+the sign flip expected where the saturating curve in
+Fig.~\ref{fig:exfil-sweep} crosses a fitted straight line.}
 \label{fig:model-fit}
 \end{figure}
 
-The model's failure mode is itself informative: it under-predicts
-increasingly badly as $N$ grows past its fitted range, consistent with
-real, diminishing-returns saturation in per-candidate conversion rate at
-scale rather than measurement noise -- the same pattern visible directly in
-Fig.~\ref{fig:exfil-sweep}. A single linear coefficient per arm is
-therefore not sufficient to describe scoring behaviour across the full
-range of candidate counts tested; it is a reasonable local approximation
-only within the regime it was fit on.
+The model's failure mode is regime-dependent rather than uniform, and the
+direction flips exactly where a saturating curve would cross a fitted
+straight line: pure-EXFILTRATION runs in the mid-range (N$\approx$800--1200)
+are under-predicted, while the largest-N run and the pure-CONFUSED\_DEPUTY
+winning run are over-predicted, consistent with the plateau visible
+directly in Fig.~\ref{fig:exfil-sweep} rather than measurement noise. This
+is compounded by a second, separate mismatch: the $N\leq450$ fit data is
+overwhelmingly mixed-quota (15 of 16 points spend candidates on both
+predicates), so applying its coefficients to single-arm runs extrapolates
+across candidate composition as well as scale. A single linear coefficient
+per arm is therefore not sufficient to describe scoring behaviour across
+the full range of candidate counts and compositions tested; it is a
+reasonable local approximation only within the regime it was fit on.
 
 \subsection{A Second Lever: Multi-Hit (K) Scaling}
+\label{sec:kscaling}
 
 Separately from candidate-count (N) scaling, a multi-hit variant was tested:
 allowing each candidate trace to attempt $K>1$ predicate hits per submission
@@ -219,11 +268,11 @@ detail, rather than the underlying attack technique, dominating an early
 result -- a distinction worth checking for before drawing conclusions from
 any single score.
 
-\subsection{Reproducibility}
+\subsection{Noise Floor}
 
 Table~\ref{tab:noise} reports run-to-run variance from exact-repeat
 submissions at three scales, used throughout this work to distinguish real
-effects from measurement noise (e.g.\ Section~\ref{sec:results}'s
+effects from measurement noise (e.g.\ Section~\ref{sec:kscaling}'s
 comparison of the $K{=}3$ results against their $K{=}1$ baselines).
 
 \begin{table}[t]
@@ -271,12 +320,12 @@ solo.
 \section{Related Work}
 
 Two other competitors' public contributions informed or overlapped with
-this work. \citet{canqiang2026} independently published a
+this work. canqiang \cite{canqiang2026} independently published a
 predicate-reachability analysis covering much of the same
 guardrail-incompleteness thesis presented here, earlier and, on the public
 leaderboard, at a higher score; that analysis should be considered the more
 thorough treatment of the shared underlying finding.
-\citet{cm392026} first described using replay timing as a side-channel to
+cm391 \cite{cm392026} first described using replay timing as a side-channel to
 infer properties of the hidden private guardrail, applying it to an
 \texttt{EXFILTRATION} submission. That technique was applied here to
 \texttt{CONFUSED\_DEPUTY} -- untested in the original post -- and the
@@ -300,6 +349,17 @@ M.~Bhatt, C.~Huang, O.~Vallis, J.~Chang, S.~Mathews, B.~Gatto, M.~Cruz,
 Y.~Yan, and M.~Plomecka, ``AI Agent Security - Multi-Step Tool Attacks,''
 Kaggle, 2026. [Online]. Available:
 \url{https://kaggle.com/competitions/ai-agent-security-multi-step-tool-attacks}
+
+\bibitem{greshake2022}
+K.~Greshake, S.~Abdelnabi, S.~Mishra, C.~Endres, T.~Holz, and M.~Fritz,
+``Not what you've signed up for: Compromising real-world LLM-integrated
+applications with indirect prompt injection,'' in \emph{Proc. 15th ACM
+Workshop on Artificial Intelligence and Security (AISec)}, 2022, pp. 79--90.
+
+\bibitem{hardy1988}
+N.~Hardy, ``The confused deputy (or why capabilities might have been
+invented),'' \emph{ACM SIGOPS Operating Systems Review}, vol.~22, no.~4,
+pp. 36--44, Oct. 1988.
 
 \bibitem{canqiang2026}
 canqiang (Xander Xu), ``The Scored Attack Surface Collapses to a Single
