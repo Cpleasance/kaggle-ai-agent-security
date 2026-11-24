@@ -3,6 +3,8 @@
 Solo entry. **290th of 4,186 teams (top 7%)** — [Bronze Medal](results/RESULTS.md).
 Public score 9.925, private score 10.365.
 
+**Plain-English write-up:** [How a guardrail scope mismatch got me a Kaggle bronze](https://corypleasance.com/posts/kaggle-agent-security-bronze/)
+
 The competition ([overview](https://www.kaggle.com/competitions/ai-agent-security-multi-step-tool-attacks))
 was an algorithmic red-teaming challenge, hosted by OpenAI, Google, and IEEE: submit
 code that searches for multi-step attack paths against a sandboxed tool-using LLM
